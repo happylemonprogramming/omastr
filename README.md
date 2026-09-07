@@ -61,6 +61,7 @@ No command ever prints the key, and it is never passed as an argument
 | Path | Purpose |
 |---|---|
 | `~/.config/omarchy/plugins/lemon.nostr/` | this plugin (code only, replaced on update) |
+| `~/.local/bin/omarchy-nostr` | symlink created by setup so the CLI is on PATH |
 | gnome-keyring (`service=omarchy-nostr`) | the nsec |
 | `~/.config/omarchy-nostr/config.json` | pubkey + relay list (public data) |
 | `~/.local/state/omarchy-nostr/` | cursors, grants (later phases) |

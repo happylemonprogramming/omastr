@@ -184,6 +184,12 @@ cmd_setup() {
   chmod 600 "$CONFIG_FILE"
   echo "Config written to $CONFIG_FILE"
 
+  # Make the CLI reachable as plain `omarchy-nostr` (plugins can't touch PATH).
+  if [[ -d $HOME/.local/bin && $SELF != "$HOME/.local/bin/omarchy-nostr" ]]; then
+    ln -sf "$SELF" "$HOME/.local/bin/omarchy-nostr"
+    echo "Symlinked to ~/.local/bin/omarchy-nostr"
+  fi
+
   cat <<EOF
 
 Done. Next steps:
@@ -330,6 +336,7 @@ cmd_uninstall() {
   fi
   secret-tool clear "${SECRET_ATTRS[@]}" 2>/dev/null || true
   rm -rf "$CONFIG_DIR" "$STATE_DIR" "$CACHE_DIR"
+  [[ -L $HOME/.local/bin/omarchy-nostr ]] && rm -f "$HOME/.local/bin/omarchy-nostr"
   echo "Removed. (The plugin itself: omarchy plugin remove lemon.nostr)"
 }
 
