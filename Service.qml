@@ -16,8 +16,14 @@ Item {
   property var shell: null
   property var manifest: null
 
-  readonly property string pluginDir: manifest && manifest.__sourceDir ? manifest.__sourceDir : ""
-  readonly property string cli: pluginDir + "/bin/omarchy-nostr"
+  // Resolved from this QML file's own location rather than the injected
+  // manifest: injected properties arrive *after* creation, and starting a
+  // Process from a property-change handler races the command binding's
+  // re-evaluation (QProcess then launches with the stale, empty path).
+  readonly property string cli: {
+    var url = Qt.resolvedUrl("bin/omarchy-nostr").toString()
+    return url.indexOf("file://") === 0 ? decodeURIComponent(url.substring(7)) : url
+  }
 
   PersistentProperties {
     id: persisted
@@ -25,7 +31,7 @@ Item {
     property bool promptedSetup: false
   }
 
-  onPluginDirChanged: if (pluginDir !== "") statusProc.running = true
+  Component.onCompleted: statusProc.running = true
 
   Process {
     id: statusProc
