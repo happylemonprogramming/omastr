@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "id": "lemon.nostr",
+  "name": "Nostr",
+  "version": "0.1.0",
+  "author": "lemon",
+  "description": "Nostr identity for Omarchy: keyring-backed signer core (notifications, app store, and browser signer build on it)",
+  "kinds": [
+    "service"
+  ],
+  "entryPoints": {
+    "service": "Service.qml"
+  }
+}

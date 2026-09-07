@@ -1,0 +1,357 @@
+#!/bin/bash
+#
+# omarchy-nostr — keyring-backed Nostr identity core for Omarchy.
+#
+# The nsec lives in the Secret Service keyring (gnome-keyring) and is only
+# ever handed to child processes via the environment, never argv, never disk.
+# Every other piece of the lemon.nostr plugin (notifications daemon, app
+# store, browser signer) is a thin client of this script.
+
+set -euo pipefail
+
+SELF="$(readlink -f "${BASH_SOURCE[0]}")"
+SELF_DIR="$(cd "$(dirname "$SELF")" && pwd)"
+
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy-nostr"
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-nostr"
+CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/omarchy-nostr"
+CONFIG_FILE="$CONFIG_DIR/config.json"
+
+# Attributes identifying our secret in the keyring.
+SECRET_ATTRS=(service omarchy-nostr key nsec)
+
+# Relays likely to carry anyone's kind 10002 relay list.
+BOOTSTRAP_RELAYS=(wss://purplepag.es wss://relay.primal.net wss://nos.lol wss://relay.damus.io)
+
+# Fallback relay list when the user has no published kind 10002.
+DEFAULT_RELAYS='[
+  {"url":"wss://relay.damus.io","read":true,"write":true},
+  {"url":"wss://relay.primal.net","read":true,"write":true},
+  {"url":"wss://nos.lol","read":true,"write":true}
+]'
+
+fail() {
+  echo "omarchy-nostr: $*" >&2
+  exit 1
+}
+
+usage() {
+  cat <<'EOF'
+Usage: omarchy-nostr <command> [args]
+
+Commands:
+  setup [--from-env] [--yes]   Store your nsec in the keyring and build config
+  status [--quiet] [--network] Health check (deps, key, config[, relay reach])
+  pubkey [--npub]              Print your public key (hex, or npub)
+  relays [read|write]          Print configured relay URLs, one per line
+  req <nak-req-args>           nak req with your read relays + NIP-42 auth
+  sign                         Sign a (partial) event JSON from stdin
+  publish                      Sign stdin event and send to your write relays
+  encrypt|decrypt <nak-args>   nak encrypt/decrypt with your key (-p <pubkey>)
+  exec [--var NAME] -- <cmd>   Run a command with the nsec in its environment
+                               (NAME defaults to NSEC; e.g. shakespeare deploy)
+  uninstall [--yes]            Remove key from keyring + all config/state/cache
+
+The key is fetched from the Secret Service keyring on demand and passed to
+child processes only via the environment. No command ever prints it.
+EOF
+}
+
+have() { command -v "$1" >/dev/null 2>&1; }
+
+require_deps() {
+  local missing=()
+  for dep in "$@"; do have "$dep" || missing+=("$dep"); done
+  if ((${#missing[@]})); then
+    fail "missing dependencies: ${missing[*]} (nak: https://github.com/fiatjaf/nak — try 'omarchy pkg aur add nak' or 'go install github.com/fiatjaf/nak@latest')"
+  fi
+}
+
+fetch_secret() {
+  secret-tool lookup "${SECRET_ATTRS[@]}" 2>/dev/null
+}
+
+have_secret() {
+  local s
+  s="$(fetch_secret)" && [[ -n $s ]]
+}
+
+require_config() {
+  [[ -s $CONFIG_FILE ]] || fail "no config at $CONFIG_FILE — run: omarchy-nostr setup"
+}
+
+config_pubkey() {
+  require_config
+  jq -re '.pubkey' "$CONFIG_FILE" 2>/dev/null || fail "config has no pubkey — re-run setup"
+}
+
+config_relays() {
+  # $1: read|write|all — prints one URL per line
+  require_config
+  case "${1:-all}" in
+  read) jq -r '.relays[] | select(.read) | .url' "$CONFIG_FILE" ;;
+  write) jq -r '.relays[] | select(.write) | .url' "$CONFIG_FILE" ;;
+  all) jq -r '.relays[].url' "$CONFIG_FILE" ;;
+  *) fail "relays: expected read|write" ;;
+  esac
+}
+
+# Run nak with the keyring secret in NOSTR_SECRET_KEY. The env var exists only
+# on the child process; this script's own environment stays clean.
+nak_with_key() {
+  local secret
+  secret="$(fetch_secret)"
+  [[ -n $secret ]] || fail "no key in keyring — run: omarchy-nostr setup"
+  NOSTR_SECRET_KEY="$secret" nak "$@"
+}
+
+# ---------------------------------------------------------------------------
+# setup
+# ---------------------------------------------------------------------------
+
+fetch_relay_list() {
+  # $1: hex pubkey — prints a JSON array of {url,read,write}, or nothing
+  local event
+  event="$(nak req -k 10002 -a "$1" -l 1 "${BOOTSTRAP_RELAYS[@]}" 2>/dev/null |
+    jq -cs 'map(select(.kind == 10002)) | max_by(.created_at) // empty')" || true
+  [[ -n $event ]] || return 1
+  jq -c '[.tags[] | select(.[0] == "r") | {
+    url: .[1],
+    read: ((.[2] // "") == "" or .[2] == "read"),
+    write: ((.[2] // "") == "" or .[2] == "write")
+  }] | map(select(.url | startswith("wss://") or startswith("ws://")))' <<<"$event"
+}
+
+cmd_setup() {
+  local from_env=0 assume_yes=0
+  for arg in "$@"; do
+    case "$arg" in
+    --from-env) from_env=1 ;;
+    --yes | -y) assume_yes=1 ;;
+    *) fail "setup: unknown option $arg" ;;
+    esac
+  done
+
+  require_deps nak secret-tool jq
+  ((assume_yes)) || require_deps gum
+
+  if have_secret; then
+    if ((assume_yes)); then
+      echo "A key is already stored; replacing it."
+    else
+      gum confirm "A Nostr key is already stored in the keyring. Replace it?" || {
+        echo "Keeping the existing key."
+        exit 0
+      }
+    fi
+  fi
+
+  local nsec=""
+  if [[ -n ${NSEC:-} ]] && { ((from_env)) || ((assume_yes)) ||
+    gum confirm "Found \$NSEC in your environment. Import that key?"; }; then
+    nsec="$NSEC"
+  else
+    ((assume_yes)) && fail "setup --yes needs \$NSEC set (or run interactively)"
+    nsec="$(gum input --password --placeholder 'nsec1...' --header 'Paste your Nostr secret key')"
+  fi
+  [[ -n $nsec ]] || fail "no key provided"
+  [[ $nsec == nsec1* ]] || fail "key must be in nsec1... format"
+
+  # Validate by deriving the pubkey (secret via stdin, never argv).
+  local pubkey
+  pubkey="$(printf '%s\n' "$nsec" | nak key public 2>/dev/null)" || true
+  [[ $pubkey =~ ^[0-9a-f]{64}$ ]] || fail "that nsec is not a valid key"
+  local npub
+  npub="$(nak encode npub "$pubkey")"
+
+  printf '%s' "$nsec" | secret-tool store --label="Omarchy Nostr key ($npub)" "${SECRET_ATTRS[@]}"
+  unset nsec
+  echo "Key stored in keyring for $npub"
+
+  mkdir -p "$CONFIG_DIR" "$STATE_DIR" "$CACHE_DIR"
+
+  echo "Fetching your relay list (kind 10002)..."
+  local relays
+  if relays="$(fetch_relay_list "$pubkey")" && [[ $(jq 'length' <<<"$relays") -gt 0 ]]; then
+    echo "Found $(jq 'length' <<<"$relays") relays from your published list."
+  else
+    relays="$(jq -c . <<<"$DEFAULT_RELAYS")"
+    echo "No published relay list found; using defaults (edit $CONFIG_FILE to change)."
+  fi
+
+  jq -n --arg pubkey "$pubkey" --arg npub "$npub" --argjson relays "$relays" \
+    '{pubkey: $pubkey, npub: $npub, relays: $relays, updatedAt: now | floor}' >"$CONFIG_FILE"
+  chmod 600 "$CONFIG_FILE"
+  echo "Config written to $CONFIG_FILE"
+
+  cat <<EOF
+
+Done. Next steps:
+  - Remove 'export NSEC=...' from your shell config (~/.bashrc) — this tool
+    replaces it. Tools that still need the raw key can use:
+      omarchy-nostr exec -- <command>            # sets NSEC for that command only
+      omarchy-nostr exec --var NOSTR_SECRET_KEY -- <command>
+  - Shakespeare deploys become:
+      omarchy-nostr exec -- npx -y @shakespeare.diy/cli deploy <subdomain>
+  - Check health any time with: omarchy-nostr status
+EOF
+}
+
+# ---------------------------------------------------------------------------
+# status
+# ---------------------------------------------------------------------------
+
+cmd_status() {
+  local quiet=0 network=0
+  for arg in "$@"; do
+    case "$arg" in
+    --quiet | -q) quiet=1 ;;
+    --network) network=1 ;;
+    *) fail "status: unknown option $arg" ;;
+    esac
+  done
+
+  local ok=0
+  check() {
+    # $1: label, $2: 0/1 pass
+    if (($2)); then
+      ((quiet)) || echo "  ok: $1"
+    else
+      ok=1
+      ((quiet)) || echo "MISSING: $1"
+    fi
+  }
+
+  local dep_ok=1
+  for dep in nak secret-tool jq gum; do
+    have "$dep" || dep_ok=0
+  done
+  check "dependencies (nak secret-tool jq gum)" "$dep_ok"
+
+  local key_ok=0
+  have_secret && key_ok=1
+  check "key in keyring" "$key_ok"
+
+  local cfg_ok=0
+  [[ -s $CONFIG_FILE ]] && jq -e '.pubkey and (.relays | length > 0)' "$CONFIG_FILE" >/dev/null 2>&1 && cfg_ok=1
+  check "config ($CONFIG_FILE)" "$cfg_ok"
+
+  if ((network)) && ((cfg_ok)); then
+    local relay reach_ok=0
+    relay="$(config_relays read | head -1)"
+    if [[ -n $relay ]] && nak relay "$relay" >/dev/null 2>&1; then reach_ok=1; fi
+    check "relay reachable ($relay)" "$reach_ok"
+  fi
+
+  if ((ok == 0)) && ((quiet == 0)); then
+    echo "healthy — $(jq -r '.npub' "$CONFIG_FILE" 2>/dev/null || echo '?')"
+  fi
+  exit "$ok"
+}
+
+# ---------------------------------------------------------------------------
+# read/key-side commands
+# ---------------------------------------------------------------------------
+
+cmd_pubkey() {
+  require_config
+  if [[ ${1:-} == --npub ]]; then
+    jq -re '.npub' "$CONFIG_FILE"
+  else
+    config_pubkey
+  fi
+}
+
+cmd_req() {
+  require_deps nak jq
+  # If the caller supplied relay URLs, respect them; otherwise append read relays.
+  local has_relay=0
+  for arg in "$@"; do
+    [[ $arg == ws://* || $arg == wss://* ]] && has_relay=1
+  done
+  local relays=()
+  if ((has_relay == 0)); then
+    mapfile -t relays < <(config_relays read)
+    ((${#relays[@]})) || fail "no read relays configured"
+  fi
+  if have_secret; then
+    # --auth: some relays silently withhold events without NIP-42.
+    nak_with_key req --auth "$@" "${relays[@]}"
+  else
+    nak req "$@" "${relays[@]}"
+  fi
+}
+
+cmd_sign() {
+  require_deps nak
+  nak_with_key event
+}
+
+cmd_publish() {
+  require_deps nak jq
+  local relays=()
+  mapfile -t relays < <(config_relays write)
+  ((${#relays[@]})) || fail "no write relays configured"
+  nak_with_key event --auth "${relays[@]}"
+}
+
+cmd_encrypt() { require_deps nak && nak_with_key encrypt "$@"; }
+cmd_decrypt() { require_deps nak && nak_with_key decrypt "$@"; }
+
+cmd_exec() {
+  local var="NSEC"
+  while (($# > 0)); do
+    case "$1" in
+    --var)
+      var="${2:?--var needs a name}"
+      shift 2
+      ;;
+    --)
+      shift
+      break
+      ;;
+    *) break ;;
+    esac
+  done
+  (($# > 0)) || fail "exec: no command given (usage: omarchy-nostr exec [--var NAME] -- <cmd...>)"
+  [[ $var =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || fail "exec: invalid variable name '$var'"
+  local secret
+  secret="$(fetch_secret)"
+  [[ -n $secret ]] || fail "no key in keyring — run: omarchy-nostr setup"
+  exec env "$var=$secret" "$@"
+}
+
+cmd_uninstall() {
+  local assume_yes=0
+  [[ ${1:-} == --yes || ${1:-} == -y ]] && assume_yes=1
+  if ((assume_yes == 0)); then
+    require_deps gum
+    gum confirm "Remove the Nostr key from the keyring and delete all omarchy-nostr config/state/cache?" || exit 0
+  fi
+  secret-tool clear "${SECRET_ATTRS[@]}" 2>/dev/null || true
+  rm -rf "$CONFIG_DIR" "$STATE_DIR" "$CACHE_DIR"
+  echo "Removed. (The plugin itself: omarchy plugin remove lemon.nostr)"
+}
+
+# ---------------------------------------------------------------------------
+
+cmd="${1:-}"
+shift || true
+case "$cmd" in
+setup) cmd_setup "$@" ;;
+status) cmd_status "$@" ;;
+pubkey) cmd_pubkey "$@" ;;
+relays) config_relays "${1:-all}" ;;
+req) cmd_req "$@" ;;
+sign) cmd_sign "$@" ;;
+publish) cmd_publish "$@" ;;
+encrypt) cmd_encrypt "$@" ;;
+decrypt) cmd_decrypt "$@" ;;
+exec) cmd_exec "$@" ;;
+uninstall) cmd_uninstall "$@" ;;
+"" | -h | --help | help) usage ;;
+*)
+  usage >&2
+  fail "unknown command: $cmd"
+  ;;
+esac
