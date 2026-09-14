@@ -1,14 +1,26 @@
 {
   "schemaVersion": 1,
-  "id": "lemon.nostr",
-  "name": "Nostr",
-  "version": "0.1.0",
+  "id": "lemon.omastr",
+  "name": "Omastr",
+  "version": "0.2.0",
   "author": "lemon",
-  "description": "Nostr identity for Omarchy: keyring-backed signer core (notifications, app store, and browser signer build on it)",
+  "description": "Nostr identity for Omarchy: the computer holds your key, and apps, nsites, notifications, and signing all flow through it. Bar ostrich toggles the wall of installed Nostr apps.",
   "kinds": [
-    "service"
+    "service",
+    "bar-widget",
+    "overlay"
   ],
+  "keepLoaded": true,
   "entryPoints": {
-    "service": "Service.qml"
+    "service": "Service.qml",
+    "barWidget": "BarIcon.qml",
+    "overlay": "Wall.qml"
+  },
+  "barWidget": {
+    "displayName": "Omastr",
+    "description": "Nostr: toggle the wall of installed apps and nsites; badge shows what needs you.",
+    "category": "Security",
+    "allowMultiple": false,
+    "defaultSection": "right"
   }
 }

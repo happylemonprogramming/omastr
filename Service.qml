@@ -2,14 +2,16 @@ import QtQuick
 import Quickshell
 import Quickshell.Io
 
-// lemon.nostr service entry point.
+// lemon.omastr service entry point.
 //
-// Phase 0: on shell startup, check whether the keyring-backed identity is
-// configured; if not, nudge once per session with a notification whose click
-// opens the setup wizard in a floating terminal.
+// On shell startup, check whether the keyring-backed identity is configured;
+// if not, nudge once per session with a notification whose click opens the
+// setup wizard in a floating terminal. (Running `omastr` also migrates any
+// pre-rename omarchy-nostr key/config to the new name.)
 //
-// Phase 1 will extend this file to spawn and babysit the notifications
-// daemon (clipboard-watcher pattern: setpriv --pdeathsig TERM + restart timer).
+// The notifications daemon phase will extend this file to spawn and babysit
+// the daemon (clipboard-watcher pattern: setpriv --pdeathsig TERM + restart
+// timer).
 Item {
   id: root
 
@@ -21,13 +23,13 @@ Item {
   // Process from a property-change handler races the command binding's
   // re-evaluation (QProcess then launches with the stale, empty path).
   readonly property string cli: {
-    var url = Qt.resolvedUrl("bin/omarchy-nostr").toString()
+    var url = Qt.resolvedUrl("bin/omastr").toString()
     return url.indexOf("file://") === 0 ? decodeURIComponent(url.substring(7)) : url
   }
 
   PersistentProperties {
     id: persisted
-    reloadableId: "lemon-nostr"
+    reloadableId: "lemon-omastr"
     property bool promptedSetup: false
   }
 
@@ -43,8 +45,8 @@ Item {
         "omarchy-notification-send",
         "-g", "󰌆",
         "-u", "normal",
-        "Nostr",
-        "Set up your Nostr identity to enable signing, notifications, and the app store.",
+        "Omastr",
+        "Set up your Nostr identity to enable signing, notifications, and the wall.",
         "--exec", "omarchy-launch-floating-terminal-with-presentation", root.cli, "setup"
       ])
     }

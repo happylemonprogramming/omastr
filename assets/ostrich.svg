@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Omastr ostrich: single-colour silhouette drawn white-on-transparent so the
+     bar can tint it to the theme foreground (and a failed tint still reads as
+     a light mark, not a black blob). One body ellipse, an S-curve neck, a
+     small head with a beak, two legs. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24">
+  <g fill="#ffffff" stroke="none">
+    <!-- body, tilted a touch tail-up -->
+    <ellipse cx="9.2" cy="12.6" rx="5.6" ry="4.1" transform="rotate(-8 9.2 12.6)"/>
+    <!-- tail fluff -->
+    <circle cx="4.6" cy="10.6" r="1.7"/>
+    <circle cx="5.4" cy="13.6" r="1.5"/>
+    <!-- head -->
+    <circle cx="17.1" cy="4.1" r="1.8"/>
+    <!-- beak -->
+    <path d="M18.5 3.4 L21.2 4.1 L18.6 5 Z"/>
+  </g>
+  <g fill="none" stroke="#ffffff" stroke-linecap="round">
+    <!-- neck: from the body's shoulder up to the head -->
+    <path d="M12.8 10.6 C15.6 9.8 16.7 8.2 16.9 5.6" stroke-width="2.1"/>
+    <!-- legs -->
+    <path d="M8.1 16.4 L7.3 21.4 L6.2 22.4" stroke-width="1.4"/>
+    <path d="M11.2 16.5 L11.9 21.4 L13 22.4" stroke-width="1.4"/>
+  </g>
+</svg>
