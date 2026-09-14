@@ -12,7 +12,8 @@ Shipped so far:
   environment.
 - **The bar ostrich** — a tinted silhouette chip; click it to open the wall,
   right-click for a health check. Its badge shows whatever number any Omastr
-  piece writes to `~/.local/state/omastr/badge`.
+  piece writes to `~/.local/state/omastr/badge` (write `0` to clear — the
+  watch does not survive the file being deleted).
 - **The wall** — a Tenna-style overlay of tiles for your installed Nostr apps
   and nsites. Number keys tune to a channel; the plus tile will open the
   catalog once that phase lands.
