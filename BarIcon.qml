@@ -29,6 +29,8 @@ BarWidget {
       var n = parseInt(String(text()).trim(), 10)
       root.badgeCount = isNaN(n) || n < 0 ? 0 : n
     }
+    // A deleted badge file must clear the count, not freeze the last one.
+    onLoadFailed: root.badgeCount = 0
   }
 
   BarIconButton {
