@@ -319,6 +319,10 @@ Item {
             // Tune straight to a channel, counted down the wall.
             root.launchIndex(event.key - Qt.Key_1)
             event.accepted = true
+          } else if (event.key === Qt.Key_Plus || event.key === Qt.Key_Equal) {
+            // The plus tile's own channel key.
+            root.openCatalog()
+            event.accepted = true
           }
         }
       }
@@ -385,8 +389,6 @@ Item {
               anchors.margins: Style.space(6)
               radius: root.cornerRadius
               color: selected ? root.selectedBackground : "transparent"
-              border.width: isPlus ? 1 : 0
-              border.color: root.border
 
               Column {
                 anchors.centerIn: parent
@@ -434,13 +436,13 @@ Item {
                 }
               }
 
-              // Channel number, counted down the wall.
+              // Channel number, counted down the wall; "+" tunes the catalog.
               Text {
-                visible: !isPlus && index < 9
+                visible: isPlus || index < 9
                 anchors.top: parent.top
                 anchors.left: parent.left
                 anchors.margins: Style.space(6)
-                text: String(index + 1)
+                text: isPlus ? "+" : String(index + 1)
                 color: selected ? root.selectedText : root.foreground
                 opacity: 0.45
                 font.family: root.fontFamily
