@@ -2,6 +2,7 @@ import Quickshell
 import Quickshell.Io
 import Quickshell.Wayland
 import QtQuick
+import QtQuick.Effects
 import qs.Commons
 import qs.Ui
 
@@ -657,7 +658,7 @@ Item {
 
           delegate: Rectangle {
             width: appList.width
-            height: Style.space(72)
+            height: infoCol.implicitHeight + Style.space(20)
             radius: root.cornerRadius
 
             readonly property var app: modelData
@@ -706,6 +707,7 @@ Item {
               }
 
               Column {
+                id: infoCol
                 width: textWidth
                 spacing: Style.space(2)
                 anchors.verticalCenter: parent.verticalCenter
@@ -744,62 +746,121 @@ Item {
 
                 Text {
                   width: parent.width
-                  text: app.about || ""
+                  text: app.website
                   color: selected ? root.selectedText : root.foreground
-                  opacity: 0.7
+                  opacity: 0.45
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.bodySmall
                   elide: Text.ElideRight
                 }
 
-                Row {
-                  id: pubRow
+                Text {
                   width: parent.width
-                  spacing: Style.space(6)
+                  text: app.about || ""
+                  color: selected ? root.selectedText : root.foreground
+                  opacity: 0.7
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                  wrapMode: Text.WordWrap
+                  maximumLineCount: 2
+                  elide: Text.ElideRight
+                }
 
-                  Image {
-                    width: Style.space(14)
-                    height: Style.space(14)
-                    visible: (app.publisher_picture || "") !== "" && status === Image.Ready
-                    fillMode: Image.PreserveAspectCrop
-                    smooth: true
-                    asynchronous: true
-                    sourceSize.width: width * 2
-                    sourceSize.height: height * 2
-                    source: app.publisher_picture || ""
+                Row {
+                  width: parent.width
+                  spacing: Style.space(8)
+                  topPadding: Style.space(2)
+
+                  // Circular avatar spanning the name + npub stack; the
+                  // publisher's initial stands in until the image lands.
+                  Item {
+                    width: Style.space(28)
+                    height: Style.space(28)
                     anchors.verticalCenter: parent.verticalCenter
+
+                    Rectangle {
+                      anchors.fill: parent
+                      radius: width / 2
+                      color: "transparent"
+                      border.width: 1
+                      border.color: root.border
+                      visible: pubAvatar.status !== Image.Ready
+
+                      Text {
+                        anchors.centerIn: parent
+                        text: (app.publisher_name || "?").charAt(0).toUpperCase()
+                        color: selected ? root.selectedText : root.foreground
+                        opacity: 0.6
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.bodySmall
+                      }
+                    }
+
+                    Image {
+                      id: pubAvatar
+                      anchors.fill: parent
+                      visible: status === Image.Ready
+                      fillMode: Image.PreserveAspectCrop
+                      smooth: true
+                      asynchronous: true
+                      sourceSize.width: width * 2
+                      sourceSize.height: height * 2
+                      source: app.publisher_picture || ""
+                      layer.enabled: true
+                      layer.smooth: true
+                      layer.effect: MultiEffect {
+                        maskEnabled: true
+                        maskSource: pubAvatarMask
+                        maskThresholdMin: 0.5
+                        maskSpreadAtMin: 1.0
+                      }
+                    }
+
+                    Item {
+                      id: pubAvatarMask
+                      anchors.fill: parent
+                      visible: false
+                      layer.enabled: true
+                      Rectangle {
+                        anchors.fill: parent
+                        radius: width / 2
+                        color: "black"
+                      }
+                    }
                   }
 
-                  Text {
-                    text: (app.publisher_name || "") !== ""
-                      ? app.publisher_name + "  " + npubShort
-                      : npubShort
-                    color: selected ? root.selectedText : root.foreground
-                    opacity: 0.6
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.bodySmall
+                  Column {
                     anchors.verticalCenter: parent.verticalCenter
-                  }
 
-                  Text {
-                    visible: app.followed === true
-                    text: "✓ following"
-                    color: selected ? root.selectedText : root.foreground
-                    opacity: 0.85
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.bodySmall
-                    anchors.verticalCenter: parent.verticalCenter
-                  }
+                    Row {
+                      spacing: Style.space(6)
 
-                  Text {
-                    width: Math.max(0, pubRow.width - x)
-                    text: "· " + app.website
-                    color: selected ? root.selectedText : root.foreground
-                    opacity: 0.45
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.bodySmall
-                    elide: Text.ElideRight
-                    anchors.verticalCenter: parent.verticalCenter
+                      Text {
+                        text: (app.publisher_name || "") !== "" ? app.publisher_name : npubShort
+                        color: selected ? root.selectedText : root.foreground
+                        opacity: 0.75
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.bodySmall
+                      }
+
+                      Text {
+                        visible: app.followed === true
+                        text: "✓ following"
+                        color: selected ? root.selectedText : root.foreground
+                        opacity: 0.85
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.bodySmall
+                      }
+                    }
+
+                    Text {
+                      visible: (app.publisher_name || "") !== ""
+                      text: npubShort
+                      color: selected ? root.selectedText : root.foreground
+                      opacity: 0.45
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.bodySmall
+                    }
                   }
                 }
               }
