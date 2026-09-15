@@ -486,7 +486,56 @@ fetch_catalog() {
     | group_by(.addr) | map(max_by(.created_at))
     | sort_by([(if .featured then 0 else 1 end), -.created_at])
   ' "$events" >"$CACHE_DIR/catalog.json"
+
+  enrich_catalog "${relays[@]}"
   jq 'length' "$CACHE_DIR/catalog.json"
+}
+
+enrich_catalog() {
+  # Adds publisher identity to each catalog entry: name/picture from the
+  # publisher's kind 0, npub, and whether the user's kind 3 follows them.
+  # Best-effort — a slow relay degrades to empty names, never a failed fetch.
+  local relays=("$@")
+  local catalog="$CACHE_DIR/catalog.json"
+  local pubkeys=()
+  mapfile -t pubkeys < <(jq -r '.[].pubkey' "$catalog" | sort -u)
+  ((${#pubkeys[@]})) || return 0
+
+  local authargs=()
+  for p in "${pubkeys[@]}"; do authargs+=(-a "$p"); done
+  local profiles
+  profiles="$(nak req -k 0 "${authargs[@]}" "${relays[@]}" 2>/dev/null |
+    jq -cs 'map(select(.kind == 0))
+      | group_by(.pubkey) | map(max_by(.created_at))
+      | map({key: .pubkey,
+             value: ((try (.content | fromjson) catch {}) as $m
+               | {name: ((($m.display_name // $m.name // "") | tostring) | gsub("^\\s+|\\s+$"; "")),
+                  picture: (($m.picture // "") | tostring)})})
+      | from_entries' 2>/dev/null)" || true
+  [[ -n $profiles && $profiles != null ]] || profiles='{}'
+
+  local follows
+  follows="$(nak req -k 3 -a "$(config_pubkey)" -l 1 "${relays[@]}" 2>/dev/null |
+    jq -cs 'map(select(.kind == 3)) | max_by(.created_at)
+      | (.tags // []) | map(select(.[0] == "p" and (.[1] | test("^[0-9a-f]{64}$")))) | map(.[1])' 2>/dev/null)" || true
+  [[ -n $follows && $follows != null ]] || follows='[]'
+
+  local npubs
+  npubs="$(paste -d' ' <(printf '%s\n' "${pubkeys[@]}") \
+    <(printf '%s\n' "${pubkeys[@]}" | nak encode npub 2>/dev/null) |
+    jq -Rn '[inputs | split(" ") | select(length == 2) | {key: .[0], value: .[1]}] | from_entries' 2>/dev/null)" || true
+  [[ -n $npubs && $npubs != null ]] || npubs='{}'
+
+  local tmp
+  tmp="$(mktemp "$CACHE_DIR/.catalog.XXXXXX")"
+  jq -c --argjson profiles "$profiles" --argjson follows "$follows" --argjson npubs "$npubs" '
+    map(. + {
+      publisher_name: ($profiles[.pubkey].name // ""),
+      publisher_picture: (($profiles[.pubkey].picture // "") | if test("^https://") then . else "" end),
+      npub: ($npubs[.pubkey] // .pubkey),
+      followed: (.pubkey as $pk | ($follows | index($pk)) != null)
+    })
+  ' "$catalog" >"$tmp" && mv "$tmp" "$catalog"
 }
 
 cmd_catalog() {
@@ -508,7 +557,7 @@ cmd_catalog() {
   while true; do
     local pick idx app name about website picture pubkey npub
     pick="$(jq -r 'to_entries[]
-      | "\(.key)\t\(if .value.featured then "★" else " " end) \(.value.name) — \(.value.about | .[0:90])"' \
+      | "\(.key)\t\(if .value.featured then "★" else " " end)\(if .value.followed then "✓" else " " end) \(.value.name) — \(.value.about | .[0:80])\(if .value.publisher_name != "" then "  · " + .value.publisher_name else "" end)"' \
       "$catalog" | gum filter --placeholder "Search apps…  (enter installs, esc quits)" --height 20)" || break
     idx="${pick%%$'\t'*}"
     app="$(jq -c ".[$idx]" "$catalog")"
@@ -516,11 +565,14 @@ cmd_catalog() {
     about="$(jq -r '.about' <<<"$app")"
     website="$(jq -r '.website' <<<"$app")"
     picture="$(jq -r '.picture' <<<"$app")"
-    pubkey="$(jq -r '.pubkey' <<<"$app")"
-    npub="$(nak encode npub "$pubkey" 2>/dev/null || echo "$pubkey")"
+    npub="$(jq -r '.npub' <<<"$app")"
+    local publisher byline
+    publisher="$(jq -r 'if .publisher_name != "" then .publisher_name else "" end' <<<"$app")"
+    byline="by ${publisher:+$publisher }(${npub:0:16}…)"
+    [[ "$(jq -r '.followed' <<<"$app")" == true ]] && byline="$byline — you follow them ✓"
 
     gum style --border rounded --padding "1 2" --margin "1 0" \
-      "$name" "" "$about" "" "→ $website" "by ${npub:0:16}…"
+      "$name" "" "$about" "" "→ $website" "$byline"
     if gum confirm "Add $name to the wall?"; then
       cmd_wall_add "$name" "$website" "$picture" || echo "Install failed — back to the list."
     fi

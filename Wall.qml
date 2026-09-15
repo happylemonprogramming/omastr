@@ -8,8 +8,9 @@ import qs.Ui
 // The Omastr wall: a Tenna-style home screen for installed Nostr apps and
 // nsites. Everything on it is the user's, in the user's order; a tile's
 // channel is its place counted down the wall, and the plus tile at the end
-// opens the catalog. Summoned via `omarchy-shell shell toggle lemon.omastr`
-// (bar ostrich, or a keybind).
+// flips to the catalog page — an app-store view of NIP-89 listings with the
+// publisher's profile and whether the user follows them. Summoned via
+// `omarchy-shell shell toggle lemon.omastr` (bar ostrich, or a keybind).
 //
 // Tiles are read from ~/.config/omastr/wall.json — a JSON array of
 //   { "id": string, "name": string, "icon": path-or-url|null, "exec": [argv] }
@@ -24,6 +25,17 @@ Item {
   property bool opened: false
   property int selectedIndex: 0
   property var tiles: []
+
+  // "wall" or "catalog"; the plus tile flips forward, Esc flips back.
+  property string page: "wall"
+
+  // Catalog state, fed by `omastr catalog --json`. The cached file renders
+  // instantly on open while a fresh fetch runs behind it.
+  property var apps: []
+  property var filteredApps: []
+  property int catalogIndex: 0
+  property bool catalogFetching: false
+  property string catalogError: ""
 
   // Shares the [menu] surface tokens so themes that style the menu style us.
   property color background: Color.menu.background
@@ -49,8 +61,13 @@ Item {
     return (Quickshell.env("XDG_CONFIG_HOME") || (Quickshell.env("HOME") + "/.config")) + "/omastr/wall.json"
   }
 
+  function cachePath() {
+    return (Quickshell.env("XDG_CACHE_HOME") || (Quickshell.env("HOME") + "/.cache")) + "/omastr/catalog.json"
+  }
+
   function open(payloadJson) {
     root.opened = true
+    root.page = "wall"
     root.selectedIndex = 0
     Qt.callLater(function() { keyCatcher.forceActiveFocus() })
   }
@@ -118,10 +135,66 @@ Item {
   }
 
   function openCatalog() {
-    root.dismiss()
-    Quickshell.execDetached([
-      "omarchy-launch-floating-terminal-with-presentation", root.cli, "catalog"
-    ])
+    root.page = "catalog"
+    root.catalogError = ""
+    root.catalogIndex = 0
+    searchField.text = ""
+    catalogCache.reload()
+    if (!catalogProc.running) {
+      root.catalogFetching = true
+      catalogProc.running = true
+    }
+    Qt.callLater(function() { searchField.forceActiveFocus() })
+  }
+
+  function showWall() {
+    root.page = "wall"
+    Qt.callLater(function() { keyCatcher.forceActiveFocus() })
+  }
+
+  function loadCatalog(raw) {
+    var next = []
+    try {
+      var parsed = JSON.parse(raw)
+      if (!Array.isArray(parsed)) return
+      for (var i = 0; i < parsed.length; i++) {
+        var a = parsed[i]
+        if (!a || typeof a.name !== "string" || typeof a.website !== "string") continue
+        next.push(a)
+      }
+    } catch (e) {
+      return
+    }
+    root.apps = next
+    root.updateFilter()
+  }
+
+  function updateFilter() {
+    var q = searchField.text.toLowerCase()
+    var out = []
+    for (var i = 0; i < root.apps.length; i++) {
+      var a = root.apps[i]
+      if (!q
+        || a.name.toLowerCase().indexOf(q) >= 0
+        || (a.about || "").toLowerCase().indexOf(q) >= 0
+        || (a.publisher_name || "").toLowerCase().indexOf(q) >= 0)
+        out.push(a)
+    }
+    root.filteredApps = out
+    if (root.catalogIndex >= out.length) root.catalogIndex = Math.max(0, out.length - 1)
+  }
+
+  function moveCatalog(delta) {
+    if (root.filteredApps.length === 0) return
+    root.catalogIndex = Math.min(Math.max(root.catalogIndex + delta, 0), root.filteredApps.length - 1)
+    appList.positionViewAtIndex(root.catalogIndex, ListView.Contain)
+  }
+
+  function installApp(app) {
+    if (!app || installProc.running) return
+    root.catalogError = ""
+    installProc.command = [root.cli, "wall", "add", app.name, app.website, app.picture || ""]
+    installProc.running = true
   }
 
   function move(delta) {
@@ -143,6 +216,38 @@ Item {
     printErrors: false
     onFileChanged: reload()
     onLoaded: root.loadWall(text())
+  }
+
+  // Last fetch's cache: renders the catalog instantly while the refresh runs.
+  // Not watched — the CLI replaces the file via mv, which inotify won't
+  // follow; the fresh data arrives on the Process stdout instead.
+  FileView {
+    id: catalogCache
+    path: root.cachePath()
+    printErrors: false
+    onLoaded: root.loadCatalog(text())
+  }
+
+  Process {
+    id: catalogProc
+    command: [root.cli, "catalog", "--json"]
+    stdout: StdioCollector {
+      id: catalogOut
+      onStreamFinished: root.loadCatalog(catalogOut.text)
+    }
+    onExited: function(exitCode) {
+      root.catalogFetching = false
+      if (exitCode !== 0 && root.apps.length === 0)
+        root.catalogError = "couldn't fetch the catalog — are your relays reachable?"
+    }
+  }
+
+  Process {
+    id: installProc
+    onExited: function(exitCode) {
+      if (exitCode === 0) root.showWall()
+      else root.catalogError = "install failed — check the journal"
+    }
   }
 
   PanelWindow {
@@ -184,6 +289,14 @@ Item {
 
         Keys.priority: Keys.BeforeItem
         Keys.onPressed: function(event) {
+          if (root.page !== "wall") {
+            // Search field owns catalog keys; catch Esc if focus strays.
+            if (event.key === Qt.Key_Escape) {
+              root.showWall()
+              event.accepted = true
+            }
+            return
+          }
           if (event.key === Qt.Key_Escape) {
             root.dismiss()
             event.accepted = true
@@ -211,6 +324,7 @@ Item {
       }
 
       Column {
+        visible: root.page === "wall"
         anchors.fill: parent
         anchors.topMargin: card.contentTopInset
         anchors.rightMargin: card.contentRightInset
@@ -339,6 +453,303 @@ Item {
                 onEntered: root.selectedIndex = index
                 onClicked: root.launchIndex(index)
               }
+            }
+          }
+        }
+      }
+
+      // Catalog page: NIP-89 listings with the publisher's face on them.
+      Column {
+        visible: root.page === "catalog"
+        anchors.fill: parent
+        anchors.topMargin: card.contentTopInset
+        anchors.rightMargin: card.contentRightInset
+        anchors.bottomMargin: card.contentBottomInset
+        anchors.leftMargin: card.contentLeftInset
+        spacing: Style.spacing.md
+
+        Row {
+          width: parent.width
+          spacing: Style.spacing.md
+
+          OstrichIcon {
+            iconSize: Style.font.title
+            color: root.foreground
+            anchors.verticalCenter: parent.verticalCenter
+          }
+
+          Text {
+            text: "Catalog"
+            color: root.foreground
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.title
+            font.bold: true
+            anchors.verticalCenter: parent.verticalCenter
+          }
+
+          Text {
+            text: root.catalogFetching ? "refreshing…"
+              : root.apps.length === 0 ? ""
+              : root.filteredApps.length === root.apps.length ? root.apps.length + " apps"
+              : root.filteredApps.length + " of " + root.apps.length
+            color: root.foreground
+            opacity: 0.55
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.body
+            anchors.verticalCenter: parent.verticalCenter
+          }
+
+          Text {
+            text: "esc → wall"
+            color: root.foreground
+            opacity: 0.35
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.bodySmall
+            anchors.verticalCenter: parent.verticalCenter
+          }
+        }
+
+        Rectangle {
+          width: parent.width
+          height: Style.space(34)
+          radius: root.cornerRadius
+          color: "transparent"
+          border.width: 1
+          border.color: root.border
+
+          TextInput {
+            id: searchField
+            anchors.fill: parent
+            anchors.leftMargin: Style.space(10)
+            anchors.rightMargin: Style.space(10)
+            verticalAlignment: TextInput.AlignVCenter
+            color: root.foreground
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.body
+            clip: true
+            onTextChanged: {
+              root.catalogIndex = 0
+              root.updateFilter()
+            }
+            Keys.onPressed: function(event) {
+              if (event.key === Qt.Key_Escape) {
+                root.showWall()
+                event.accepted = true
+              } else if (event.key === Qt.Key_Down) {
+                root.moveCatalog(1)
+                event.accepted = true
+              } else if (event.key === Qt.Key_Up) {
+                root.moveCatalog(-1)
+                event.accepted = true
+              } else if (event.key === Qt.Key_PageDown) {
+                root.moveCatalog(8)
+                event.accepted = true
+              } else if (event.key === Qt.Key_PageUp) {
+                root.moveCatalog(-8)
+                event.accepted = true
+              } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+                root.installApp(root.filteredApps[root.catalogIndex])
+                event.accepted = true
+              }
+            }
+
+            Text {
+              visible: searchField.text === ""
+              anchors.verticalCenter: parent.verticalCenter
+              text: "Search apps…  (enter installs, esc backs out)"
+              color: root.foreground
+              opacity: 0.35
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.body
+            }
+          }
+        }
+
+        Text {
+          visible: root.catalogError !== ""
+            || (root.apps.length === 0 && root.catalogFetching)
+            || (root.apps.length > 0 && root.filteredApps.length === 0)
+          text: root.catalogError !== "" ? root.catalogError
+            : root.apps.length === 0 ? "Fetching the catalog from your relays…"
+            : "no matches"
+          color: root.foreground
+          opacity: 0.55
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.body
+        }
+
+        ListView {
+          id: appList
+          width: parent.width
+          height: parent.height - y
+          clip: true
+          spacing: Style.space(4)
+          model: root.filteredApps
+          interactive: contentHeight > height
+
+          delegate: Rectangle {
+            width: appList.width
+            height: Style.space(72)
+            radius: root.cornerRadius
+
+            readonly property var app: modelData
+            readonly property bool selected: index === root.catalogIndex
+            readonly property string npubShort:
+              ((app.npub || app.pubkey || "") + "").substring(0, 12) + "…"
+            // Room left of the install affordance.
+            readonly property int textWidth:
+              width - Style.space(10) * 2 - Style.space(44) - Style.space(12) - Style.space(88)
+
+            color: selected ? root.selectedBackground : "transparent"
+
+            Row {
+              anchors.fill: parent
+              anchors.margins: Style.space(10)
+              spacing: Style.space(12)
+
+              Item {
+                width: Style.space(44)
+                height: Style.space(44)
+                anchors.verticalCenter: parent.verticalCenter
+
+                Image {
+                  id: appIcon
+                  anchors.fill: parent
+                  visible: status === Image.Ready
+                  fillMode: Image.PreserveAspectFit
+                  smooth: true
+                  asynchronous: true
+                  sourceSize.width: width * 2
+                  sourceSize.height: height * 2
+                  source: app.picture || ""
+                }
+
+                Text {
+                  anchors.centerIn: parent
+                  visible: appIcon.status !== Image.Ready
+                  text: app.name.charAt(0).toUpperCase()
+                  color: selected ? root.selectedText : root.foreground
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.space(26)
+                  font.bold: true
+                }
+              }
+
+              Column {
+                width: textWidth
+                spacing: Style.space(2)
+                anchors.verticalCenter: parent.verticalCenter
+
+                Row {
+                  spacing: Style.space(6)
+
+                  Text {
+                    text: app.name
+                    color: selected ? root.selectedText : root.foreground
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.body
+                    font.bold: true
+                  }
+
+                  Text {
+                    visible: app.featured === true
+                    text: "★"
+                    color: selected ? root.selectedText : root.foreground
+                    opacity: 0.8
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.bodySmall
+                    anchors.verticalCenter: parent.verticalCenter
+                  }
+                }
+
+                Text {
+                  width: parent.width
+                  text: app.about || ""
+                  color: selected ? root.selectedText : root.foreground
+                  opacity: 0.7
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                  elide: Text.ElideRight
+                }
+
+                Row {
+                  id: pubRow
+                  width: parent.width
+                  spacing: Style.space(6)
+
+                  Image {
+                    width: Style.space(14)
+                    height: Style.space(14)
+                    visible: (app.publisher_picture || "") !== "" && status === Image.Ready
+                    fillMode: Image.PreserveAspectCrop
+                    smooth: true
+                    asynchronous: true
+                    sourceSize.width: width * 2
+                    sourceSize.height: height * 2
+                    source: app.publisher_picture || ""
+                    anchors.verticalCenter: parent.verticalCenter
+                  }
+
+                  Text {
+                    text: (app.publisher_name || "") !== ""
+                      ? app.publisher_name + "  " + npubShort
+                      : npubShort
+                    color: selected ? root.selectedText : root.foreground
+                    opacity: 0.6
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.bodySmall
+                    anchors.verticalCenter: parent.verticalCenter
+                  }
+
+                  Text {
+                    visible: app.followed === true
+                    text: "✓ following"
+                    color: selected ? root.selectedText : root.foreground
+                    opacity: 0.85
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.bodySmall
+                    anchors.verticalCenter: parent.verticalCenter
+                  }
+
+                  Text {
+                    width: Math.max(0, pubRow.width - x)
+                    text: "· " + app.website
+                    color: selected ? root.selectedText : root.foreground
+                    opacity: 0.45
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.bodySmall
+                    elide: Text.ElideRight
+                    anchors.verticalCenter: parent.verticalCenter
+                  }
+                }
+              }
+            }
+
+            Text {
+              visible: selected
+              anchors.right: parent.right
+              anchors.rightMargin: Style.space(12)
+              anchors.verticalCenter: parent.verticalCenter
+              text: installProc.running ? "installing…" : "install ⏎"
+              color: root.selectedText
+              opacity: 0.8
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+
+              MouseArea {
+                anchors.fill: parent
+                anchors.margins: -Style.space(6)
+                onClicked: root.installApp(app)
+              }
+            }
+
+            MouseArea {
+              anchors.fill: parent
+              anchors.rightMargin: Style.space(88)
+              hoverEnabled: true
+              onEntered: root.catalogIndex = index
+              onClicked: root.catalogIndex = index
+              onDoubleClicked: root.installApp(app)
             }
           }
         }
