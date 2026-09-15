@@ -110,13 +110,17 @@ Item {
     Quickshell.execDetached(tile.exec)
   }
 
+  // Resolved from this QML file's own URL (see Service.qml for why not the
+  // injected manifest).
+  readonly property string cli: {
+    var url = Qt.resolvedUrl("bin/omastr").toString()
+    return url.indexOf("file://") === 0 ? decodeURIComponent(url.substring(7)) : url
+  }
+
   function openCatalog() {
-    // Placeholder until the catalog phase lands; the plus tile is the door,
-    // the door just says so for now.
     root.dismiss()
     Quickshell.execDetached([
-      "omarchy-notification-send", "-g", "󰄾", "Omastr",
-      "The app catalog is on its way. Tiles can be added to ~/.config/omastr/wall.json meanwhile."
+      "omarchy-launch-floating-terminal-with-presentation", root.cli, "catalog"
     ])
   }
 

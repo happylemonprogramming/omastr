@@ -16,6 +16,19 @@ CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/omastr"
 STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/omastr"
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/omastr"
 CONFIG_FILE="$CONFIG_DIR/config.json"
+WALL_FILE="$CONFIG_DIR/wall.json"
+HICOLOR_DIR="$HOME/.local/share/icons/hicolor/256x256/apps"
+
+# NIP-89 app store constants, mirroring Din/NostrHub.
+APP_HANDLER_KIND=31990
+FEATURED_PACK_PUBKEY=932614571afcbad4d17a191ee281e39eebbb41b93fac8fd87829622aeb112f4d
+FEATURED_PACK_D=k4p5w0n22suf
+# Relays cap recency queries; many listings only surface by category tag.
+APP_CATEGORY_TAGS=(social tools video pictures marketplace music podcast
+  communities messaging dvm fitness productivity education image todo
+  rideshare ditto mkstack relay nostr chat news article blog media images
+  hosting code pastebin storage blossom upload tool zaps goals gigs bounties
+  escrow freelance bunker desktop ephemeral password-manager)
 
 # Attributes identifying our secret in the keyring.
 SECRET_ATTRS=(service omastr key nsec)
@@ -51,6 +64,10 @@ Commands:
   encrypt|decrypt <nak-args>   nak encrypt/decrypt with your key (-p <pubkey>)
   run [--var NAME] -- <cmd>    Run a command with the nsec in its environment
                                (NAME defaults to NSEC; e.g. shakespeare deploy)
+  catalog [--json]             Browse NIP-89 app listings and install to the wall
+  wall add <name> <url> [icon] Install a web app + put its tile on the wall
+  wall remove <name>           Take a tile off the wall
+  wall list                    Print the wall's tiles
   uninstall [--yes]            Remove key from keyring + all config/state/cache
 
 The key is fetched from the Secret Service keyring on demand and passed to
@@ -350,6 +367,166 @@ cmd_run() {
   exec env "$var=$secret" "$@"
 }
 
+# ---------------------------------------------------------------------------
+# the wall — tiles for installed Nostr apps, drawn by Wall.qml
+# ---------------------------------------------------------------------------
+
+# Must mirror omarchy-webapp-install's safe_icon_name so the icon path we put
+# in wall.json is the file the installer actually wrote.
+slugify() {
+  printf '%s\n' "$1" |
+    tr '[:upper:]' '[:lower:]' |
+    sed 's/[^[:alnum:]]\+/-/g; s/^-//; s/-$//'
+}
+
+ensure_wall() {
+  mkdir -p "$CONFIG_DIR"
+  [[ -s $WALL_FILE ]] || echo '[]' >"$WALL_FILE"
+}
+
+cmd_wall_add() {
+  local name="${1:-}" url="${2:-}" icon="${3:-}"
+  [[ -n $name && -n $url ]] || fail "usage: omastr wall add <name> <url> [icon-url]"
+  [[ $name == */* ]] && fail "name cannot contain '/'"
+  require_deps jq
+  have omarchy-webapp-install || fail "omarchy-webapp-install not found — is this an Omarchy system?"
+
+  # The stock installer fetches/installs the icon and writes the .desktop
+  # launcher entry; the wall tile then reuses the exact icon file it wrote.
+  omarchy-webapp-install "$name" "$url" "$icon"
+
+  local slug icon_path
+  slug="$(slugify "$name")"
+  icon_path="$HICOLOR_DIR/$slug.png"
+  [[ -f $icon_path ]] || icon_path=""
+
+  ensure_wall
+  local tmp
+  tmp="$(mktemp "$CONFIG_DIR/.wall.XXXXXX")"
+  jq --arg id "$slug" --arg name "$name" --arg url "$url" --arg icon "$icon_path" '
+    map(select(.id != $id and (((.exec // []) | index($url)) | not)))
+    + [{id: $id, name: $name,
+        icon: (if $icon == "" then null else $icon end),
+        exec: ["omarchy-launch-webapp", $url]}]
+  ' "$WALL_FILE" >"$tmp" && mv "$tmp" "$WALL_FILE"
+  echo "On the wall: $name → $url"
+}
+
+cmd_wall_remove() {
+  local name="${1:-}"
+  [[ -n $name ]] || fail "usage: omastr wall remove <name>"
+  require_deps jq
+  ensure_wall
+  local slug tmp
+  slug="$(slugify "$name")"
+  tmp="$(mktemp "$CONFIG_DIR/.wall.XXXXXX")"
+  jq --arg id "$slug" --arg name "$name" \
+    'map(select(.id != $id and .name != $name))' "$WALL_FILE" >"$tmp" && mv "$tmp" "$WALL_FILE"
+  echo "Off the wall: $name"
+  echo "(Launcher entry stays; remove it with: omarchy-webapp-remove \"$name\")"
+}
+
+cmd_wall_list() {
+  require_deps jq
+  ensure_wall
+  jq -r 'to_entries[] | "\(.key + 1)\t\(.value.name)\t\(.value.exec | join(" "))"' "$WALL_FILE"
+}
+
+# ---------------------------------------------------------------------------
+# catalog — browse NIP-89 (kind 31990) app listings and install to the wall
+# ---------------------------------------------------------------------------
+
+fetch_catalog() {
+  # Writes parsed catalog JSON to $CACHE_DIR/catalog.json; echoes app count.
+  mkdir -p "$CACHE_DIR"
+  local relays=()
+  mapfile -t relays < <(config_relays read)
+  ((${#relays[@]})) || fail "no read relays configured — run: omastr setup"
+
+  local events="$CACHE_DIR/catalog-events.jsonl"
+  local tagargs=()
+  for t in "${APP_CATEGORY_TAGS[@]}"; do tagargs+=(-t "t=$t"); done
+  {
+    # Two REQs, per Din: a plain recency scan plus a category-tag scan, since
+    # relays cap recency queries and many listings only surface by category.
+    nak req -k "$APP_HANDLER_KIND" -l 100 "${relays[@]}" 2>/dev/null || true
+    nak req -k "$APP_HANDLER_KIND" -l 100 "${tagargs[@]}" "${relays[@]}" 2>/dev/null || true
+  } >"$events"
+
+  # Featured = members of the Team Soapbox follow pack (kind 39089).
+  local featured
+  featured="$(nak req -k 39089 -a "$FEATURED_PACK_PUBKEY" -d "$FEATURED_PACK_D" -l 1 "${relays[@]}" 2>/dev/null |
+    jq -cs 'map(select(.kind == 39089)) | max_by(.created_at)
+      | (.tags // []) | map(select(.[0] == "p" and (.[1] | test("^[0-9a-f]{64}$")))) | map(.[1])' 2>/dev/null)" || true
+  [[ -n $featured && $featured != null ]] || featured='[]'
+
+  # Din's parsing rules: d tag required; name/about/picture/website all
+  # required from content JSON; https-only URLs; latest revision per
+  # (pubkey, d); featured first, then newest.
+  jq -cs --argjson featured "$featured" '
+    [ .[]
+      | select(.kind == '"$APP_HANDLER_KIND"')
+      | . as $e
+      | ([$e.tags[] | select(.[0] == "d")][0][1] // null) as $d
+      | select($d != null and $d != "")
+      | (try ($e.content | fromjson) catch null) as $m
+      | select(($m | type) == "object")
+      | {addr: "\($e.pubkey):\($d)",
+         created_at: $e.created_at,
+         pubkey: $e.pubkey,
+         name: ((($m.name // $m.display_name // "") | tostring) | gsub("^\\s+|\\s+$"; "")),
+         about: ((($m.about // "") | tostring) | gsub("\\s+"; " ") | gsub("^ | $"; "")),
+         picture: (($m.picture // "") | tostring),
+         website: (($m.website // "") | tostring)}
+      | select(.name != "" and .about != "" and .picture != "" and .website != "")
+      | select(.website | test("^https://"))
+      | select(.picture | test("^https://"))
+      | .featured = ((.pubkey as $p | $featured | index($p)) != null)
+    ]
+    | group_by(.addr) | map(max_by(.created_at))
+    | sort_by([(if .featured then 0 else 1 end), -.created_at])
+  ' "$events" >"$CACHE_DIR/catalog.json"
+  jq 'length' "$CACHE_DIR/catalog.json"
+}
+
+cmd_catalog() {
+  if [[ ${1:-} == --json ]]; then
+    require_deps nak jq
+    fetch_catalog >/dev/null
+    cat "$CACHE_DIR/catalog.json"
+    return
+  fi
+  require_deps nak jq gum
+
+  echo "Fetching app catalog from your relays..."
+  local count
+  count="$(fetch_catalog)"
+  ((count > 0)) || fail "no installable listings found (relays may be slow — try again)"
+  echo "$count apps."
+
+  local catalog="$CACHE_DIR/catalog.json"
+  while true; do
+    local pick idx app name about website picture pubkey npub
+    pick="$(jq -r 'to_entries[]
+      | "\(.key)\t\(if .value.featured then "★" else " " end) \(.value.name) — \(.value.about | .[0:90])"' \
+      "$catalog" | gum filter --placeholder "Search apps…  (enter installs, esc quits)" --height 20)" || break
+    idx="${pick%%$'\t'*}"
+    app="$(jq -c ".[$idx]" "$catalog")"
+    name="$(jq -r '.name' <<<"$app")"
+    about="$(jq -r '.about' <<<"$app")"
+    website="$(jq -r '.website' <<<"$app")"
+    picture="$(jq -r '.picture' <<<"$app")"
+    pubkey="$(jq -r '.pubkey' <<<"$app")"
+    npub="$(nak encode npub "$pubkey" 2>/dev/null || echo "$pubkey")"
+
+    gum style --border rounded --padding "1 2" --margin "1 0" \
+      "$name" "" "$about" "" "→ $website" "by ${npub:0:16}…"
+    if gum confirm "Add $name to the wall?"; then
+      cmd_wall_add "$name" "$website" "$picture" || echo "Install failed — back to the list."
+    fi
+  done
+}
+
 cmd_uninstall() {
   local assume_yes=0
   [[ ${1:-} == --yes || ${1:-} == -y ]] && assume_yes=1
@@ -381,6 +558,17 @@ publish) cmd_publish "$@" ;;
 encrypt) cmd_encrypt "$@" ;;
 decrypt) cmd_decrypt "$@" ;;
 run | exec) cmd_run "$@" ;;
+wall)
+  sub="${1:-list}"
+  shift || true
+  case "$sub" in
+  add) cmd_wall_add "$@" ;;
+  remove | rm) cmd_wall_remove "$@" ;;
+  list | ls) cmd_wall_list ;;
+  *) fail "wall: unknown subcommand '$sub' (add|remove|list)" ;;
+  esac
+  ;;
+catalog) cmd_catalog "$@" ;;
 uninstall) cmd_uninstall "$@" ;;
 "" | -h | --help | help) usage ;;
 *)
