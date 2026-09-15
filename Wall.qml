@@ -37,6 +37,10 @@ Item {
   property bool catalogFetching: false
   property string catalogError: ""
 
+  // Two-step remove: first Delete/Enter arms (tile.id on the wall, app name
+  // in the catalog), the next confirms. Any navigation disarms.
+  property string pendingRemoveId: ""
+
   // Shares the [menu] surface tokens so themes that style the menu style us.
   property color background: Color.menu.background
   property color foreground: Color.menu.text
@@ -69,6 +73,7 @@ Item {
     root.opened = true
     root.page = "wall"
     root.selectedIndex = 0
+    root.pendingRemoveId = ""
     Qt.callLater(function() { keyCatcher.forceActiveFocus() })
   }
 
@@ -123,8 +128,45 @@ Item {
     }
     if (index < 0 || index >= root.tiles.length) return
     var tile = root.tiles[index]
+    if (root.pendingRemoveId === tile.id) {
+      root.removeByName(tile.name)
+      return
+    }
     root.dismiss()
     Quickshell.execDetached(tile.exec)
+  }
+
+  function toggleRemoveArm(index) {
+    if (index < 0 || index >= root.tiles.length) return
+    var tile = root.tiles[index]
+    if (root.pendingRemoveId === tile.id) root.removeByName(tile.name)
+    else root.pendingRemoveId = tile.id
+  }
+
+  function removeByName(name) {
+    if (removeProc.running) return
+    root.pendingRemoveId = ""
+    removeProc.command = [root.cli, "wall", "remove", "--purge", name]
+    removeProc.running = true
+  }
+
+  function isInstalled(app) {
+    for (var i = 0; i < root.tiles.length; i++) {
+      var t = root.tiles[i]
+      if (t.name === app.name || t.exec.indexOf(app.website) >= 0) return true
+    }
+    return false
+  }
+
+  // Enter/click in the catalog: install, or arm-then-remove when installed.
+  function catalogPrimary(app) {
+    if (!app) return
+    if (root.isInstalled(app)) {
+      if (root.pendingRemoveId === app.name) root.removeByName(app.name)
+      else root.pendingRemoveId = app.name
+    } else {
+      root.installApp(app)
+    }
   }
 
   // Resolved from this QML file's own URL (see Service.qml for why not the
@@ -138,6 +180,7 @@ Item {
     root.page = "catalog"
     root.catalogError = ""
     root.catalogIndex = 0
+    root.pendingRemoveId = ""
     searchField.text = ""
     catalogCache.reload()
     if (!catalogProc.running) {
@@ -149,6 +192,7 @@ Item {
 
   function showWall() {
     root.page = "wall"
+    root.pendingRemoveId = ""
     Qt.callLater(function() { keyCatcher.forceActiveFocus() })
   }
 
@@ -186,6 +230,7 @@ Item {
 
   function moveCatalog(delta) {
     if (root.filteredApps.length === 0) return
+    root.pendingRemoveId = ""
     root.catalogIndex = Math.min(Math.max(root.catalogIndex + delta, 0), root.filteredApps.length - 1)
     appList.positionViewAtIndex(root.catalogIndex, ListView.Contain)
   }
@@ -199,6 +244,7 @@ Item {
 
   function move(delta) {
     if (root.slotCount === 0) return
+    root.pendingRemoveId = ""
     root.selectedIndex = (root.selectedIndex + delta + root.slotCount) % root.slotCount
     grid.positionViewAtIndex(root.selectedIndex, GridView.Contain)
   }
@@ -206,6 +252,7 @@ Item {
   function moveRow(delta) {
     var next = root.selectedIndex + delta * root.columns
     if (next < 0 || next >= root.slotCount) return
+    root.pendingRemoveId = ""
     root.selectedIndex = next
     grid.positionViewAtIndex(root.selectedIndex, GridView.Contain)
   }
@@ -247,6 +294,15 @@ Item {
     onExited: function(exitCode) {
       if (exitCode === 0) root.showWall()
       else root.catalogError = "install failed — check the journal"
+    }
+  }
+
+  // Uninstall: tile off the wall + launcher/icon gone (wall remove --purge).
+  // The wall.json watch redraws whichever page is showing.
+  Process {
+    id: removeProc
+    onExited: function(exitCode) {
+      if (exitCode !== 0) root.catalogError = "remove failed — check the journal"
     }
   }
 
@@ -298,7 +354,11 @@ Item {
             return
           }
           if (event.key === Qt.Key_Escape) {
-            root.dismiss()
+            if (root.pendingRemoveId !== "") root.pendingRemoveId = ""
+            else root.dismiss()
+            event.accepted = true
+          } else if (event.key === Qt.Key_Delete || event.key === Qt.Key_X) {
+            root.toggleRemoveArm(root.selectedIndex)
             event.accepted = true
           } else if (event.key === Qt.Key_Left) {
             root.move(-1)
@@ -383,6 +443,7 @@ Item {
             readonly property bool isPlus: index === root.tiles.length
             readonly property var tile: isPlus ? null : root.tiles[index]
             readonly property bool selected: index === root.selectedIndex
+            readonly property bool armed: !isPlus && tile !== null && root.pendingRemoveId === tile.id
 
             Rectangle {
               anchors.fill: parent
@@ -426,8 +487,8 @@ Item {
                 Text {
                   anchors.horizontalCenter: parent.horizontalCenter
                   width: grid.cellWidth - Style.space(20)
-                  text: isPlus ? "Add" : (tile ? tile.name : "")
-                  color: selected ? root.selectedText : root.foreground
+                  text: isPlus ? "Add" : armed ? "remove? ⏎" : (tile ? tile.name : "")
+                  color: armed ? Color.urgent : selected ? root.selectedText : root.foreground
                   opacity: isPlus ? 0.7 : 0.9
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.body
@@ -452,7 +513,10 @@ Item {
               MouseArea {
                 anchors.fill: parent
                 hoverEnabled: true
-                onEntered: root.selectedIndex = index
+                onEntered: {
+                  if (root.selectedIndex !== index) root.pendingRemoveId = ""
+                  root.selectedIndex = index
+                }
                 onClicked: root.launchIndex(index)
               }
             }
@@ -531,11 +595,13 @@ Item {
             clip: true
             onTextChanged: {
               root.catalogIndex = 0
+              root.pendingRemoveId = ""
               root.updateFilter()
             }
             Keys.onPressed: function(event) {
               if (event.key === Qt.Key_Escape) {
-                root.showWall()
+                if (root.pendingRemoveId !== "") root.pendingRemoveId = ""
+                else root.showWall()
                 event.accepted = true
               } else if (event.key === Qt.Key_Down) {
                 root.moveCatalog(1)
@@ -550,7 +616,7 @@ Item {
                 root.moveCatalog(-8)
                 event.accepted = true
               } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
-                root.installApp(root.filteredApps[root.catalogIndex])
+                root.catalogPrimary(root.filteredApps[root.catalogIndex])
                 event.accepted = true
               }
             }
@@ -596,6 +662,8 @@ Item {
 
             readonly property var app: modelData
             readonly property bool selected: index === root.catalogIndex
+            readonly property bool installed: root.isInstalled(app)
+            readonly property bool armed: installed && root.pendingRemoveId === app.name
             readonly property string npubShort:
               ((app.npub || app.pubkey || "") + "").substring(0, 12) + "…"
             // Room left of the install affordance.
@@ -658,6 +726,16 @@ Item {
                     text: "★"
                     color: selected ? root.selectedText : root.foreground
                     opacity: 0.8
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.bodySmall
+                    anchors.verticalCenter: parent.verticalCenter
+                  }
+
+                  Text {
+                    visible: installed
+                    text: "· installed"
+                    color: selected ? root.selectedText : root.foreground
+                    opacity: 0.5
                     font.family: root.fontFamily
                     font.pixelSize: Style.font.bodySmall
                     anchors.verticalCenter: parent.verticalCenter
@@ -732,16 +810,18 @@ Item {
               anchors.right: parent.right
               anchors.rightMargin: Style.space(12)
               anchors.verticalCenter: parent.verticalCenter
-              text: installProc.running ? "installing…" : "install ⏎"
-              color: root.selectedText
-              opacity: 0.8
+              text: armed ? "sure? ⏎"
+                : installed ? "remove ⏎"
+                : installProc.running ? "installing…" : "install ⏎"
+              color: armed ? Color.urgent : root.selectedText
+              opacity: armed ? 1 : 0.8
               font.family: root.fontFamily
               font.pixelSize: Style.font.bodySmall
 
               MouseArea {
                 anchors.fill: parent
                 anchors.margins: -Style.space(6)
-                onClicked: root.installApp(app)
+                onClicked: root.catalogPrimary(app)
               }
             }
 
@@ -749,9 +829,12 @@ Item {
               anchors.fill: parent
               anchors.rightMargin: Style.space(88)
               hoverEnabled: true
-              onEntered: root.catalogIndex = index
+              onEntered: {
+                if (root.catalogIndex !== index) root.pendingRemoveId = ""
+                root.catalogIndex = index
+              }
               onClicked: root.catalogIndex = index
-              onDoubleClicked: root.installApp(app)
+              onDoubleClicked: root.catalogPrimary(app)
             }
           }
         }

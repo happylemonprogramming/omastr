@@ -66,7 +66,7 @@ Commands:
                                (NAME defaults to NSEC; e.g. shakespeare deploy)
   catalog [--json]             Browse NIP-89 app listings and install to the wall
   wall add <name> <url> [icon] Install a web app + put its tile on the wall
-  wall remove <name>           Take a tile off the wall
+  wall remove [--purge] <name> Take a tile off the wall (--purge: launcher too)
   wall list                    Print the wall's tiles
   uninstall [--yes]            Remove key from keyring + all config/state/cache
 
@@ -413,8 +413,10 @@ cmd_wall_add() {
 }
 
 cmd_wall_remove() {
+  local purge=0
+  [[ ${1:-} == --purge ]] && { purge=1; shift; }
   local name="${1:-}"
-  [[ -n $name ]] || fail "usage: omastr wall remove <name>"
+  [[ -n $name ]] || fail "usage: omastr wall remove [--purge] <name>"
   require_deps jq
   ensure_wall
   local slug tmp
@@ -423,7 +425,15 @@ cmd_wall_remove() {
   jq --arg id "$slug" --arg name "$name" \
     'map(select(.id != $id and .name != $name))' "$WALL_FILE" >"$tmp" && mv "$tmp" "$WALL_FILE"
   echo "Off the wall: $name"
-  echo "(Launcher entry stays; remove it with: omarchy-webapp-remove \"$name\")"
+  if ((purge)); then
+    if have omarchy-webapp-remove; then
+      omarchy-webapp-remove "$name" && echo "Uninstalled: $name"
+    else
+      echo "(omarchy-webapp-remove not found; launcher entry left in place)"
+    fi
+  else
+    echo "(Launcher entry stays; remove it fully with: omastr wall remove --purge \"$name\")"
+  fi
 }
 
 cmd_wall_list() {
