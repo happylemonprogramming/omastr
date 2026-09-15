@@ -15,17 +15,23 @@ Shipped so far:
   piece writes to `~/.local/state/omastr/badge` (write `0` to clear — the
   watch does not survive the file being deleted).
 - **The wall** — a Tenna-style overlay of tiles for your installed Nostr apps
-  and nsites. Number keys tune to a channel; the plus tile will open the
-  catalog once that phase lands.
+  and nsites. Number keys tune to a channel, `+` opens the catalog, and
+  `Delete`/`x` on a tile removes it (press again to confirm).
+- **The catalog** — an app store built from NIP-89 handler events (kind
+  31990) on your own relays, no central index. Each listing shows the app's
+  icon, description, and the publisher's profile — name, avatar, npub, and
+  whether *you* follow them (from your kind 3). Featured apps (★) are members
+  of a curated follow pack. Enter installs: launcher entry, icon, and wall
+  tile in one step. Also available in the terminal as `omastr catalog`.
 
 Planned on the same core: a mentions/zaps/reactions notifications daemon, a
-NIP-89 + nsite catalog, a localhost nsite gateway, and NIP-07/NIP-46 signer
-doors with per-app, per-kind grants.
+localhost nsite gateway, and NIP-07/NIP-46 signer doors with per-app,
+per-kind grants.
 
 ## Install
 
 ```sh
-omarchy plugin add https://.../omarchy-nostr.git   # installs disabled; review it
+omarchy plugin add https://github.com/happylemonprogramming/omastr.git   # installs disabled; review it
 omarchy plugin enable lemon.omastr
 omarchy bar put lemon.omastr                        # the ostrich chip
 ```
@@ -68,6 +74,9 @@ echo '{"kind":1,"content":"hi"}' | omastr sign      # sign, don't publish
 echo '{"kind":1,"content":"hi"}' | omastr publish   # sign + send to write relays
 omastr encrypt -p <pubkey> "secret"                 # NIP-44 (add --nip04 for legacy)
 omastr run -- npx -y @shakespeare.diy/cli deploy my-app
+omastr catalog               # browse + install NIP-89 apps (add --json for scripts)
+omastr wall add "Ditto" https://ditto.pub    # install a web app + wall tile
+omastr wall remove --purge "Ditto"           # uninstall (tile + launcher + icon)
 ```
 
 `run` is the escape hatch for tools that insist on a raw key in the
@@ -89,8 +98,9 @@ Tiles live in `~/.config/omastr/wall.json`, a JSON array in wall order:
 ]
 ```
 
-The overlay watches the file and redraws on change. The catalog phase will
-write it for you; until then it's hand-editable.
+The overlay watches the file and redraws on change. The catalog and
+`omastr wall add` write it for you, but it stays hand-editable — reorder the
+array to reorder your channels.
 
 ## File layout
 
